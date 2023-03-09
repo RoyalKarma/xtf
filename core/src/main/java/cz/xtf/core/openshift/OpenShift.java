@@ -41,6 +41,7 @@ import cz.xtf.core.waiting.Waiter;
 import io.fabric8.kubernetes.api.builder.Visitor;
 import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.api.model.Container;
+import io.fabric8.kubernetes.api.model.DeletionPropagation;
 import io.fabric8.kubernetes.api.model.Endpoints;
 import io.fabric8.kubernetes.api.model.EnvVar;
 import io.fabric8.kubernetes.api.model.EnvVarBuilder;
@@ -70,7 +71,6 @@ import io.fabric8.kubernetes.api.model.rbac.RoleBinding;
 import io.fabric8.kubernetes.api.model.rbac.RoleBindingBuilder;
 import io.fabric8.kubernetes.api.model.rbac.Subject;
 import io.fabric8.kubernetes.api.model.rbac.SubjectBuilder;
-import io.fabric8.kubernetes.client.AppsAPIGroupClient;
 import io.fabric8.kubernetes.client.Config;
 import io.fabric8.kubernetes.client.KubernetesClientException;
 import io.fabric8.kubernetes.client.LocalPortForward;
@@ -88,16 +88,16 @@ import io.fabric8.openshift.api.model.ProjectRequestBuilder;
 import io.fabric8.openshift.api.model.Route;
 import io.fabric8.openshift.api.model.RouteSpecBuilder;
 import io.fabric8.openshift.api.model.Template;
-import io.fabric8.openshift.client.DefaultOpenShiftClient;
 import io.fabric8.openshift.client.OpenShiftConfig;
 import io.fabric8.openshift.client.OpenShiftConfigBuilder;
 import io.fabric8.openshift.client.ParameterValue;
+import io.fabric8.openshift.client.impl.OpenShiftClientImpl;
 import lombok.extern.slf4j.Slf4j;
 import rx.Observable;
 import rx.observables.StringObservable;
 
 @Slf4j
-public class OpenShift extends DefaultOpenShiftClient {
+public class OpenShift extends OpenShiftClientImpl {
     private static ServiceLoader<CustomResourceDefinitionContextProvider> crdContextProviderLoader;
     private static volatile String routeSuffix;
 
@@ -115,7 +115,6 @@ public class OpenShift extends DefaultOpenShiftClient {
      * NOTE: at the moment only place where this is used is for labeling namespaces. Other usages may be added in the future.
      */
     public static final String XTF_MANAGED_LABEL = "xtf.cz/managed";
-    private final AppsAPIGroupClient appsAPIGroupClient;
 
     /**
      * Autoconfigures the client with the default fabric8 client rules
@@ -218,8 +217,6 @@ public class OpenShift extends DefaultOpenShiftClient {
     public OpenShift(OpenShiftConfig openShiftConfig) {
         super(openShiftConfig);
 
-        appsAPIGroupClient = new AppsAPIGroupClient(this);
-
         this.waiters = new OpenShiftWaiters(this);
     }
 
@@ -242,13 +239,13 @@ public class OpenShift extends DefaultOpenShiftClient {
     public void setupPullSecret(String name, String secret) {
         Secret pullSecret = new SecretBuilder()
                 .withNewMetadata()
-                .withNewName(name)
+                .withName(name)
                 .addToLabels(KEEP_LABEL, "true")
                 .endMetadata()
-                .withNewType("kubernetes.io/dockerconfigjson")
+                .withType("kubernetes.io/dockerconfigjson")
                 .withData(Collections.singletonMap(".dockerconfigjson", Base64.getEncoder().encodeToString(secret.getBytes())))
                 .build();
-        secrets().createOrReplace(pullSecret);
+        secrets().resource(pullSecret).createOrReplace();
         serviceAccounts().withName("default").edit(new Visitor<ServiceAccountBuilder>() {
             @Override
             public void visit(ServiceAccountBuilder builder) {
@@ -277,15 +274,18 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public KubernetesList createResources(KubernetesList resources) {
-        return lists().create(resources);
+        KubernetesList list = new KubernetesList();
+        list.setItems(resourceList(resources.getItems()).create());
+        return list;
     }
 
     public boolean deleteResources(KubernetesList resources) {
-        return lists().delete(resources);
+        return resources.getItems().size() == resourceList(resources.getItems()).delete().size();
     }
 
     public void loadResource(InputStream is) {
-        load(is).deletingExisting().createOrReplace();
+        load(is).delete();
+        load(is).create();
     }
 
     // Projects
@@ -366,12 +366,12 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public boolean deleteProject(String name) {
-        return getProject(name) != null ? projects().withName(name).delete() : false;
+        return getProject(name) != null ? !projects().withName(name).delete().isEmpty() : false;
     }
 
     // ImageStreams
     public ImageStream createImageStream(ImageStream imageStream) {
-        return imageStreams().create(imageStream);
+        return imageStreams().resource(imageStream).create();
     }
 
     public ImageStream getImageStream(String name) {
@@ -384,24 +384,24 @@ public class OpenShift extends DefaultOpenShiftClient {
 
     // StatefulSets
     public StatefulSet createStatefulSet(StatefulSet statefulSet) {
-        return appsAPIGroupClient.statefulSets().create(statefulSet);
+        return apps().statefulSets().resource(statefulSet).create();
     }
 
     public StatefulSet getStatefulSet(String name) {
-        return appsAPIGroupClient.statefulSets().withName(name).get();
+        return apps().statefulSets().withName(name).get();
     }
 
     public List<StatefulSet> getStatefulSets() {
-        return appsAPIGroupClient.statefulSets().list().getItems();
+        return apps().statefulSets().list().getItems();
     }
 
     public boolean deleteImageStream(ImageStream imageStream) {
-        return imageStreams().delete(imageStream);
+        return !imageStreams().resource(imageStream).delete().isEmpty();
     }
 
     // ImageStreamsTags
     public ImageStreamTag createImageStreamTag(ImageStreamTag imageStreamTag) {
-        return imageStreamTags().create(imageStreamTag);
+        return imageStreamTags().resource(imageStreamTag).create();
     }
 
     public ImageStreamTag getImageStreamTag(String imageStreamName, String tag) {
@@ -413,12 +413,12 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public boolean deleteImageStreamTag(ImageStreamTag imageStreamTag) {
-        return imageStreamTags().delete(imageStreamTag);
+        return !imageStreamTags().resource(imageStreamTag).delete().isEmpty();
     }
 
     // Pods
     public Pod createPod(Pod pod) {
-        return pods().create(pod);
+        return pods().resource(pod).create();
     }
 
     public Pod getPod(String name) {
@@ -560,7 +560,7 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public boolean deletePod(Pod pod, long gracePeriod) {
-        return pods().withName(pod.getMetadata().getName()).withGracePeriod(gracePeriod).delete();
+        return !pods().withName(pod.getMetadata().getName()).withGracePeriod(gracePeriod).delete().isEmpty();
     }
 
     /**
@@ -571,11 +571,11 @@ public class OpenShift extends DefaultOpenShiftClient {
      * @return True if any pod has been deleted
      */
     public boolean deletePods(String key, String value) {
-        return pods().withLabel(key, value).delete();
+        return !pods().withLabel(key, value).delete().isEmpty();
     }
 
     public boolean deletePods(Map<String, String> labels) {
-        return pods().withLabels(labels).delete();
+        return !pods().withLabels(labels).delete().isEmpty();
     }
 
     /**
@@ -613,7 +613,7 @@ public class OpenShift extends DefaultOpenShiftClient {
 
     // Secrets
     public Secret createSecret(Secret secret) {
-        return secrets().create(secret);
+        return secrets().resource(secret).create();
     }
 
     public Secret getSecret(String name) {
@@ -636,12 +636,12 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public boolean deleteSecret(Secret secret) {
-        return secrets().delete(secret);
+        return !secrets().resource(secret).delete().isEmpty();
     }
 
     // Services
     public Service createService(Service service) {
-        return services().create(service);
+        return services().resource(service).create();
     }
 
     public Service getService(String name) {
@@ -653,12 +653,12 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public boolean deleteService(Service service) {
-        return services().delete(service);
+        return !services().resource(service).delete().isEmpty();
     }
 
     // Endpoints
     public Endpoints createEndpoint(Endpoints endpoint) {
-        return endpoints().create(endpoint);
+        return endpoints().resource(endpoint).create();
     }
 
     public Endpoints getEndpoint(String name) {
@@ -670,12 +670,12 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public boolean deleteEndpoint(Endpoints endpoint) {
-        return endpoints().delete(endpoint);
+        return !endpoints().resource(endpoint).delete().isEmpty();
     }
 
     // Routes
     public Route createRoute(Route route) {
-        return routes().create(route);
+        return routes().resource(route).create();
     }
 
     public Route getRoute(String name) {
@@ -687,7 +687,7 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public boolean deleteRoute(Route route) {
-        return routes().delete(route);
+        return !routes().resource(route).delete().isEmpty();
     }
 
     /**
@@ -729,12 +729,13 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     private boolean deleteReplicationController(ReplicationController replicationController) {
-        return replicationControllers().withName(replicationController.getMetadata().getName()).cascading(false).delete();
+        return !replicationControllers().withName(replicationController.getMetadata().getName()).cascading(false).delete()
+                .isEmpty();
     }
 
     // DeploymentConfigs
     public DeploymentConfig createDeploymentConfig(DeploymentConfig deploymentConfig) {
-        return deploymentConfigs().create(deploymentConfig);
+        return deploymentConfigs().resource(deploymentConfig).create();
     }
 
     public DeploymentConfig getDeploymentConfig(String name) {
@@ -759,7 +760,7 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public DeploymentConfig updateDeploymentconfig(DeploymentConfig deploymentConfig) {
-        return deploymentConfigs().withName(deploymentConfig.getMetadata().getName()).replace(deploymentConfig);
+        return deploymentConfigs().withName(deploymentConfig.getMetadata().getName()).replace();
     }
 
     /**
@@ -787,7 +788,7 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public boolean deleteDeploymentConfig(DeploymentConfig deploymentConfig, boolean cascading) {
-        return deploymentConfigs().withName(deploymentConfig.getMetadata().getName()).cascading(cascading).delete();
+        return !deploymentConfigs().withName(deploymentConfig.getMetadata().getName()).cascading(cascading).delete().isEmpty();
     }
 
     /**
@@ -832,7 +833,7 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public boolean deleteBuild(Build build) {
-        return builds().delete(build);
+        return !builds().resource(build).delete().isEmpty();
     }
 
     public Build startBuild(String buildConfigName) {
@@ -846,7 +847,7 @@ public class OpenShift extends DefaultOpenShiftClient {
 
     // BuildConfigs
     public BuildConfig createBuildConfig(BuildConfig buildConfig) {
-        return buildConfigs().create(buildConfig);
+        return buildConfigs().resource(buildConfig).create();
     }
 
     public BuildConfig getBuildConfig(String name) {
@@ -869,7 +870,7 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public BuildConfig updateBuildConfig(BuildConfig buildConfig) {
-        return buildConfigs().withName(buildConfig.getMetadata().getName()).replace(buildConfig);
+        return buildConfigs().withName(buildConfig.getMetadata().getName()).replace();
     }
 
     /**
@@ -893,12 +894,12 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public boolean deleteBuildConfig(BuildConfig buildConfig) {
-        return buildConfigs().delete(buildConfig);
+        return !buildConfigs().resource(buildConfig).delete().isEmpty();
     }
 
     // ServiceAccounts
     public ServiceAccount createServiceAccount(ServiceAccount serviceAccount) {
-        return serviceAccounts().create(serviceAccount);
+        return serviceAccounts().resource(serviceAccount).create();
     }
 
     public ServiceAccount getServiceAccount(String name) {
@@ -927,13 +928,12 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public boolean deleteServiceAccount(ServiceAccount serviceAccount) {
-        boolean result = serviceAccounts().delete(serviceAccount);
-        return result;
+        return !serviceAccounts().resource(serviceAccount).delete().isEmpty();
     }
 
     // RoleBindings
     public RoleBinding createRoleBinding(RoleBinding roleBinding) {
-        return rbac().roleBindings().create(roleBinding);
+        return rbac().roleBindings().resource(roleBinding).create();
     }
 
     public RoleBinding getRoleBinding(String name) {
@@ -973,7 +973,7 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public boolean deleteRoleBinding(RoleBinding roleBinding) {
-        return rbac().roleBindings().delete(roleBinding);
+        return !rbac().roleBindings().resource(roleBinding).delete().isEmpty();
     }
 
     public RoleBinding addRoleToUser(String roleName, String username) {
@@ -1082,7 +1082,7 @@ public class OpenShift extends DefaultOpenShiftClient {
 
     // ResourceQuotas
     public ResourceQuota createResourceQuota(ResourceQuota resourceQuota) {
-        return resourceQuotas().create(resourceQuota);
+        return resourceQuotas().resource(resourceQuota).create();
     }
 
     public ResourceQuota getResourceQuota(String name) {
@@ -1090,12 +1090,12 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public boolean deleteResourceQuota(ResourceQuota resourceQuota) {
-        return resourceQuotas().delete(resourceQuota);
+        return !resourceQuotas().resource(resourceQuota).delete().isEmpty();
     }
 
     // Persistent volume claims
     public PersistentVolumeClaim createPersistentVolumeClaim(PersistentVolumeClaim pvc) {
-        return persistentVolumeClaims().create(pvc);
+        return persistentVolumeClaims().resource(pvc).create();
     }
 
     public PersistentVolumeClaim getPersistentVolumeClaim(String name) {
@@ -1107,12 +1107,12 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public boolean deletePersistentVolumeClaim(PersistentVolumeClaim pvc) {
-        return persistentVolumeClaims().delete(pvc);
+        return !persistentVolumeClaims().resource(pvc).delete().isEmpty();
     }
 
     // HorizontalPodAutoscalers
     public HorizontalPodAutoscaler createHorizontalPodAutoscaler(HorizontalPodAutoscaler hpa) {
-        return autoscaling().v1().horizontalPodAutoscalers().create(hpa);
+        return autoscaling().v1().horizontalPodAutoscalers().resource(hpa).create();
     }
 
     public HorizontalPodAutoscaler getHorizontalPodAutoscaler(String name) {
@@ -1124,12 +1124,12 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public boolean deleteHorizontalPodAutoscaler(HorizontalPodAutoscaler hpa) {
-        return autoscaling().v1().horizontalPodAutoscalers().delete(hpa);
+        return !autoscaling().v1().horizontalPodAutoscalers().resource(hpa).delete().isEmpty();
     }
 
     // ConfigMaps
     public ConfigMap createConfigMap(ConfigMap configMap) {
-        return configMaps().create(configMap);
+        return configMaps().resource(configMap).create();
     }
 
     public ConfigMap getConfigMap(String name) {
@@ -1153,11 +1153,11 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public boolean deleteConfigMap(ConfigMap configMap) {
-        return configMaps().delete(configMap);
+        return !configMaps().resource(configMap).delete().isEmpty();
     }
 
     public Template createTemplate(Template template) {
-        return templates().create(template);
+        return templates().resource(template).create();
     }
 
     public Template getTemplate(String name) {
@@ -1169,11 +1169,11 @@ public class OpenShift extends DefaultOpenShiftClient {
     }
 
     public boolean deleteTemplate(String name) {
-        return templates().withName(name).delete();
+        return !templates().withName(name).delete().isEmpty();
     }
 
     public boolean deleteTemplate(Template template) {
-        return templates().delete(template);
+        return !templates().resource(template).delete().isEmpty();
     }
 
     public Template loadAndCreateTemplate(InputStream is) {
@@ -1276,7 +1276,7 @@ public class OpenShift extends DefaultOpenShiftClient {
     public Waiter clean() {
         for (CustomResourceDefinitionContextProvider crdContextProvider : OpenShift.getCRDContextProviders()) {
             try {
-                customResources(crdContextProvider.getContext(), GenericKubernetesResource.class,
+                newHasMetadataOperation(crdContextProvider.getContext(), GenericKubernetesResource.class,
                         GenericKubernetesResourceList.class)
                                 .inNamespace(getNamespace()).delete();
                 log.debug("DELETE :: " + crdContextProvider.getContext().getName() + " instances");
@@ -1289,7 +1289,7 @@ public class OpenShift extends DefaultOpenShiftClient {
         apps().deployments().withLabelNotIn(KEEP_LABEL, "", "true").delete();
         apps().replicaSets().withLabelNotIn(KEEP_LABEL, "", "true").delete();
         apps().statefulSets().withLabelNotIn(KEEP_LABEL, "", "true").delete();
-        batch().jobs().withLabelNotIn(KEEP_LABEL, "", "true").delete();
+        batch().v1().jobs().withLabelNotIn(KEEP_LABEL, "", "true").delete();
         deploymentConfigs().withLabelNotIn(KEEP_LABEL, "", "true").delete();
         replicationControllers().withLabelNotIn(KEEP_LABEL, "", "true").delete();
         buildConfigs().withLabelNotIn(KEEP_LABEL, "", "true").delete();
@@ -1312,7 +1312,7 @@ public class OpenShift extends DefaultOpenShiftClient {
 
         for (HasMetadata hasMetadata : listRemovableResources()) {
             log.warn("DELETE LEFTOVER :: " + hasMetadata.getKind() + "/" + hasMetadata.getMetadata().getName());
-            resource(hasMetadata).withGracePeriod(0).cascading(true).delete();
+            resource(hasMetadata).withGracePeriod(0).withPropagationPolicy(DeletionPropagation.FOREGROUND).delete();
         }
 
         return waiters.isProjectClean();
@@ -1324,7 +1324,7 @@ public class OpenShift extends DefaultOpenShiftClient {
         removables.addAll(templates().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
         removables.addAll(apps().deployments().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
         removables.addAll(apps().replicaSets().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
-        removables.addAll(batch().jobs().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
+        removables.addAll(batch().v1().jobs().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
         removables.addAll(deploymentConfigs().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
         removables.addAll(apps().statefulSets().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
         removables.addAll(replicationControllers().withLabelNotIn(OpenShift.KEEP_LABEL, "", "true").list().getItems());
