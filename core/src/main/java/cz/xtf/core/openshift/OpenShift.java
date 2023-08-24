@@ -1393,7 +1393,7 @@ public class OpenShift extends NamespacedOpenShiftClientAdapter {
                 .append(newConfig.getNamespace(), existingConfig.getNamespace())
                 .append(newConfig.getUsername(), existingConfig.getUsername())
                 .append(newConfig.getPassword(), existingConfig.getPassword())
-                //.append(newConfig.getRequestConfig().getOauthToken(), existingConfig.getRequestConfig().getOauthToken())
+                .append(newConfig.getOauthToken(), existingConfig.getOauthToken())
                 .append(newConfig.isTrustCerts(), existingConfig.isTrustCerts())
                 .isEquals();
     }
